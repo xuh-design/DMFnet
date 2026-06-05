@@ -1,0 +1,114 @@
+# Ultralytics YOLO 🚀, AGPL-3.0 license
+# YOLOv8 Dual-Modality Object Detection Model with RGB and IR branches
+
+# Parameters
+nc: 80
+scales:
+  n: [0.33, 0.25, 1024]
+  s: [0.33, 0.50, 1024]
+  m: [0.67, 0.75, 768]
+  l: [1.00, 1.00, 512]
+  x: [1.00, 1.25, 512]
+
+# Dual-Modality YOLOv8 Backbone with RGB and IR branches
+backbone:
+  # [from, repeats, module, args]
+  
+  # ========== RGB Branch ==========
+  - [-1, 1, Conv, [64, 3, 2]]          # 0-P1/2: RGB第一层
+  - [-1, 1, Conv, [128, 3, 2]]         # 1-P2/4: RGB第二层
+  
+  # 层1后接VEFM + 残差
+  - [1, 1, VisibleEdgeFusionModule, [128]]  # 2: RGB边缘提取
+  - [[1, 2], 1, ADD, []]               # 3: 残差连接
+  
+  - [-1, 3, C2f, [128, True]]          # 4: RGB第三层
+  
+  # 层4(C2f) → Conv(256ch) → VEFM → 残差
+  - [4, 1, Conv, [256, 3, 2]]          # 5: 下采样+升维到256ch
+  - [5, 1, VisibleEdgeFusionModule, [256]]  # 6: RGB边缘提取
+  - [[5, 6], 1, ADD, []]                # 7: 残差连接
+  
+  # ========== IR Branch ==========
+  - [-4, 1, Conv, [64, 3, 2]]          # 8: IR第一层 (从IR分支开始)
+  - [-1, 1, Conv, [128, 3, 2]]         # 9: IR第二层
+  
+  # 层9(Conv) → IEFM → 残差
+  - [9, 1, InfraredEdgeFusionModule, [128]]  # 10: IR边缘提取
+  - [[9, 10], 1, ADD, []]              # 11: 残差连接
+  
+  - [-1, 3, C2f, [128, True]]          # 12: IR第三层
+  
+  # 层12(C2f) → Conv(256ch) → IEFM → 残差
+  - [12, 1, Conv, [256, 3, 2]]         # 13: 下采样+升维到256ch
+  - [13, 1, InfraredEdgeFusionModule, [256]] # 14: IR边缘提取
+  - [[13, 14], 1, ADD, []]             # 15: 残差连接
+  
+  # ========== CMAM_1 Fusion ==========
+  - [[7, 15], 1, CMAM_1, [64]]        # 16: CMAM_1模块 (输入64ch，输出64ch)
+  
+  # CMAM_1输出与原始特征做残差连接
+  - [[7, 16], 1, ADD, []]               # 17: RGB残差
+  - [[15, 16], 1, ADD, []]              # 18: IR残差
+  
+  # ========== Stage 1 Processing ==========
+  - [17, 6, C2f, [256, True]]           # 19: RGB分支C2f
+  - [18, 6, C2f, [256, True]]           # 20: IR分支C2f
+  
+  - [19, 1, Conv, [512, 3, 2]]          # 21: RGB分支下采样
+  - [20, 1, Conv, [512, 3, 2]]          # 22: IR分支下采样
+  
+  # ========== Stage 1 Fusion ==========
+  - [[21, 22], 1, CMAM_2, [128]]           # 23: CMAM_2模块
+  
+  - [[21, 23], 1, ADD, []]               # 24: RGB特征 + CMAM_2输出
+  - [[22, 23], 1, ADD, []]               # 25: IR特征 + CMAM_2输出
+  
+  # ========== Stage 2 Processing ==========
+  - [24, 6, C2f, [512, True]]           # 26: RGB分支C2f
+  - [25, 6, C2f, [512, True]]           # 27: IR分支C2f
+  
+  - [26, 1, Conv, [1024, 3, 2]]         # 28: RGB分支下采样
+  - [27, 1, Conv, [1024, 3, 2]]         # 29: IR分支下采样
+  
+  # ========== Stage 2 Fusion ==========
+  - [[28, 29], 1, CMAM_3, [256]]           # 30: CMAM_3模块
+  
+  - [[28, 30], 1, ADD, []]              # 28: RGB特征 + CMAM_3输出
+  - [[29, 30], 1, ADD, []]              # 29: IR特征 + CMAM_3输出
+  
+  # ========== Stage 3 Processing ==========
+  - [31, 3, C2f, [1024, True]]          # 33: RGB分支C2f
+  - [32, 3, C2f, [1024, True]]          # 34: IR分支C2f
+  
+  - [33, 1, SPPF, [1024, 5]]            # 35: RGB分支SPPF
+  - [34, 1, SPPF, [1024, 5]]            # 36: IR分支SPPF
+  
+  # ========== Multi-Scale Feature Fusion ==========
+  - [[19, 20], 1, ADD, []]              # 37: Stage 1特征融合 (512ch)
+  - [[26, 27], 1, ADD, []]             # 38: Stage 2特征融合 (1024ch)
+  - [[35, 36], 1, ADD, []]             # 39: Stage 3特征融合 (1024ch)
+
+# Dual-Modality YOLOv8 Head
+head:
+  # ========== P5 (39, 1024ch) 上采样到 P4尺度 ==========
+  - [-1, 1, nn.Upsample, [None, 2, 'nearest']]  # 40: 上采样层39
+  - [[-1, 38], 1, Concat, [1]]         # 41: 拼接 (上采样1024 + 1024 = 2048ch)
+  - [-1, 3, C2f, [512]]                 # 42: 特征融合
+  
+  # ========== P4 (38, 1024ch) 上采样到 P3尺度 ==========
+  - [-1, 1, nn.Upsample, [None, 2, 'nearest']]  # 43: 上采样层38
+  - [[-1, 37], 1, Concat, [1]]         # 44: 拼接 (上采样1024 + 512 = 1536ch)
+  - [-1, 3, C2f, [256]]                 # 45: 特征融合
+  
+  # ========== Bottom-Up Path ==========
+  - [45, 1, Conv, [256, 3, 2]]         # 46: 下采样P3->P4
+  - [[-1, 42], 1, Concat, [1]]         # 47: 拼接 (256 + 512 = 768ch)
+  - [-1, 3, C2f, [512]]                 # 48: 特征融合
+  
+  - [48, 1, Conv, [512, 3, 2]]         # 49: 下采样P4->P5
+  - [[-1, 39], 1, Concat, [1]]         # 50: 拼接 (512 + 1024 = 1536ch)
+  - [-1, 3, C2f, [1024]]                # 51: 特征融合
+  
+  # ========== Detection Output ==========
+  - [[45, 48, 51], 1, Detect, [nc]]    # 52: 检测头 (P3, P4, P5)

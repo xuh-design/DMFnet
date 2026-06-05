@@ -1,0 +1,132 @@
+yaml_content = '''# Ultralytics YOLO 🚀, AGPL-3.0 license
+# Dual-Modality YOLOv8 with Multi-Stage Iterative Neck (inspired by YOLO11)
+# Usage: Combine with your custom modules (VisibleEdgeFusionModule, InfraredEdgeFusionModule, CMAM_*, SpatialWeightedFusion)
+
+# Parameters
+nc: 80
+scales:
+  n: [0.33, 0.25, 1024]
+  s: [0.33, 0.50, 1024]
+  m: [0.67, 0.75, 768]
+  l: [1.00, 1.00, 512]
+  x: [1.00, 1.25, 512]
+
+# ========== Backbone (Dual-Modality with CMAM and Edge Enhancement) ==========
+backbone:
+  # [from, repeats, module, args]
+  
+  # ---------- RGB Branch ----------
+  - [-1, 1, ESSamp, [64, 3, 2]]          # 0-P1/2
+  - [-1, 1, ESSamp, [128, 3, 2]]         # 1-P2/4
+  - [1, 1, VisibleEdgeFusionModule, [128]]  # 2: RGB边缘提取
+  - [[1, 2], 1, ADD, []]               # 3: 残差
+  - [-1, 3, C2f, [128, True]]          # 4 (RGB P2, 128ch)
+  - [4, 1, Conv, [256, 3, 2]]          # 5: 下采样到P3
+  - [5, 1, VisibleEdgeFusionModule, [256]]  # 6: RGB边缘提取
+  - [[5, 6], 1, ADD, []]               # 7 (RGB P3, 256ch)
+  
+  # ---------- IR Branch ----------
+  - [-4, 1, ESSamp, [64, 3, 2]]          # 8: IR第一层 (从IR分支开始)
+  - [-1, 1, ESSamp, [128, 3, 2]]         # 9: IR第二层
+  - [9, 1, InfraredEdgeFusionModule, [128]] # 10: IR边缘提取
+  - [[9, 10], 1, ADD, []]              # 11: 残差
+  - [-1, 3, C2f, [128, True]]          # 12 (IR P2, 128ch)
+  - [12, 1, Conv, [256, 3, 2]]         # 13: 下采样到P3
+  - [13, 1, InfraredEdgeFusionModule, [256]] # 14: IR边缘提取
+  - [[13, 14], 1, ADD, []]             # 15 (IR P3, 256ch)
+  
+  # ---------- CMAM_1 Fusion ----------
+  - [[7, 15], 1, CMAM_1, [64]]         # 16: CMAM_1模块
+  - [[7, 16], 1, ADD, []]              # 17: RGB残差
+  - [[15, 16], 1, ADD, []]             # 18: IR残差
+  
+  # ---------- Stage 1 Processing ----------
+  - [17, 6, C2f, [256, True]]          # 19 (RGB P3 refined, 256ch)
+  - [18, 6, C2f, [256, True]]          # 20 (IR P3 refined, 256ch)
+  - [19, 1, Conv, [512, 3, 2]]         # 21 (RGB P4)
+  - [20, 1, Conv, [512, 3, 2]]         # 22 (IR P4)
+  
+  # ---------- CMAM_2 Fusion ----------
+  - [[21, 22], 1, CMAM_2, [128]]       # 23: CMAM_2模块
+  - [[21, 23], 1, ADD, []]             # 24 (RGB P4 after CMAM)
+  - [[22, 23], 1, ADD, []]             # 25 (IR P4 after CMAM)
+  
+  # ---------- Stage 2 Processing ----------
+  - [24, 6, C2f, [512, True]]          # 26 (RGB P4 refined, 512ch)
+  - [25, 6, C2f, [512, True]]          # 27 (IR P4 refined, 512ch)
+  - [26, 1, Conv, [1024, 3, 2]]        # 28 (RGB P5)
+  - [27, 1, Conv, [1024, 3, 2]]        # 29 (IR P5)
+  
+  # ---------- CMAM_3 Fusion ----------
+  - [[28, 29], 1, CMAM_3, [256]]       # 30: CMAM_3模块
+  - [[28, 30], 1, ADD, []]             # 31 (RGB P5 after CMAM)
+  - [[29, 30], 1, ADD, []]             # 32 (IR P5 after CMAM)
+  
+  # ---------- Stage 3 Processing ----------
+  - [31, 3, C2f, [1024, True]]         # 33 (RGB P5 refined, 1024ch)
+  - [32, 3, C2f, [1024, True]]         # 34 (IR P5 refined, 1024ch)
+  - [33, 1, SPPF, [1024, 5]]           # 35 (RGB SPPF)
+  - [34, 1, SPPF, [1024, 5]]           # 36 (IR SPPF)
+  
+  # ---------- Multi-Scale Feature Fusion ----------
+  # P3 refined fused (来自19和20层，经过C2f处理)
+  - [[19, 20], 1, SpatialWeightedFusion, []]  # 37 (P3 refined fused, 256ch)
+  # P4 fused
+  - [[26, 27], 1, SpatialWeightedFusion, []]  # 38 (P4 fused, 512ch)
+  # P5 fused
+  - [[35, 36], 1, SpatialWeightedFusion, []]  # 39 (P5 fused, 1024ch)
+  
+  # ---------- 原始P2融合（供迭代颈部重用） ----------
+  - [[4, 12], 1, SpatialWeightedFusion, []]  # 40 (P2 raw fused, 128ch)
+
+# ========== Head (Multi-Stage Iterative Neck) ==========
+head:
+  # -------- Stage 1: Top-down FPN ----------
+  - [39, 1, nn.Upsample, [None, 2, 'nearest']]  # 41: upsample P5 (1024) to P4 size
+  - [[41, 38], 1, Concat, [1]]                  # 42: cat (1024+512=1536)
+  - [42, 3, C2f, [512, False]]                  # 43: P4_1 (512ch)
+
+  - [43, 1, nn.Upsample, [None, 2, 'nearest']]  # 44: upsample P4_1 to P3 size
+  - [[44, 37], 1, Concat, [1]]                  # 45: cat (512+256=768)
+  - [45, 3, C2f, [256, False]]                  # 46: P3_1 (256ch)
+
+  - [46, 1, nn.Upsample, [None, 2, 'nearest']]  # 47: upsample P3_1 to P2 size
+  - [[47, 40], 1, Concat, [1]]                  # 48: cat (256+128=384)
+  - [48, 3, C2f, [128, False]]                  # 49: P2_1 (128ch)
+
+  # -------- Stage 2: Bottom-up refinement ----------
+  # Step 1: Downsample P2_1 to P3 size and fuse with P3_refined (37)
+  - [49, 1, Conv, [256, 3, 2]]                  # 50: downsample (128->256, to P3 size)
+  - [[50, 37], 1, Concat, [1]]                  # 51: cat with P3_refined (256ch) → 512
+  - [51, 3, C2f, [256, False]]                  # 52: P3_2 (256ch)
+
+  # Step 2: Upsample to P2 and fuse with P2_raw (40) and P2_1 (49)
+  - [52, 1, nn.Upsample, [None, 2, 'nearest']]  # 53: upsample to P2 size (256ch)
+  - [[40, 49], 1, Concat, [1]]                  # 54: cat P2_raw (128) and P2_1 (128) → 256ch
+  - [[53, 54], 1, Concat, [1]]                  # 55: cat upsample (256) with 54 (256) → 512ch
+  - [55, 3, C2f, [128, False]]                  # 56: P2_2 (128ch)
+
+  # -------- Stage 3: Further refinement ----------
+  # Downsample P2_2 to P3 and fuse with P3_refined (37)
+  - [56, 1, Conv, [256, 3, 2]]                  # 57: downsample (128->256, P3 size)
+  - [[57, 37], 1, Concat, [1]]                  # 58: cat P3_refined (256), current (256) → 512
+  - [58, 3, C2f, [256, False]]                  # 59: P3_3 (256ch)
+
+  # Upsample to P2 and fuse with P2_raw (40), P2_2 (56)
+  - [59, 1, nn.Upsample, [None, 2, 'nearest']]  # 60: upsample to P2 size (256ch)
+  - [[40, 56], 1, Concat, [1]]                  # 61: cat P2_raw (128), P2_2 (128) → 256ch
+  - [[60, 61], 1, Concat, [1]]                  # 62: cat upsample (256) with 61 (256) → 512ch
+  - [62, 3, C2f, [128, False]]                  # 63: P2_3 (128ch)
+
+  # -------- Detection Output (using P2_3, P3_3, and P4_1) ----------
+  - [[63, 59, 43], 1, Detect, [nc]]            # 64: Detect(P2, P3, P4)
+'''
+
+if __name__ == '__main__':
+    import yaml
+    from pathlib import Path
+
+    output_path = Path(__file__).parent / '3_essamp.yaml'
+    with open(output_path, 'w', encoding='utf-8') as f:
+        f.write(yaml_content)
+    print(f"YAML file saved to: {output_path}")
